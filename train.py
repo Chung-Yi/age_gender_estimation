@@ -8,7 +8,7 @@ from keras.callbacks import EarlyStopping, ModelCheckpoint
 from keras import backend as K
 
 from cv_core.detector.face_inference import FaceLocationDetector
-from keras.layers import Input, Dense, Flatten
+from keras.layers import Input, Dense, Flatten, GlobalMaxPool2D, MaxPool2D
 from keras.layers.convolutional import Conv2D, AveragePooling2D, MaxPooling2D
 from keras.layers.normalization import BatchNormalization
 from keras.models import Model
@@ -30,7 +30,7 @@ EPOCHS = 2000
 parser = ArgumentParser()
 parser.add_argument("train_dir", help="train dataset")
 parser.add_argument("test_dir", help="test dataset")
-parser.add_argument('--gpu',  help="enable gpu", action='store_true')
+parser.add_argument('--gpu', help="enable gpu", action='store_true')
 
 
 def load_data(train_path):
@@ -54,10 +54,15 @@ def load_data(train_path):
     return np.asarray(img_list), age_list, gender_list
 
 
-def freeze_session(session, keep_var_names=None, output_names=None, clear_devices=True):
+def freeze_session(session,
+                   keep_var_names=None,
+                   output_names=None,
+                   clear_devices=True):
     graph = session.graph
     with graph.as_default():
-        freeze_var_names = list(set(v.op.name for v in tf.global_variables()).difference(keep_var_names or []))
+        freeze_var_names = list(
+            set(v.op.name for v in tf.global_variables()).difference(
+                keep_var_names or []))
         output_names = output_names or []
         output_names += [v.op.name for v in tf.global_variables()]
         input_graph_def = graph.as_graph_def()
@@ -75,28 +80,48 @@ def init_detector():
     detector = FaceLocationDetector()
 
 
-def main():
-    init_detector()
-    args = parser.parse_args()
-    train_path = args.train_dir
-    test_path = args.test_dir
+def conv_block(inp, filters=32, bn=True, pool=True):
+    m = Conv2D(filters=filters, kernel_size=(3, 3), activation='relu')(inp)
+    if bn:
+        m = BatchNormalization()(m)
+    if pool:
+        m = MaxPool2D(pool_size=(2, 2), strides=(1, 1), padding='same')(m)
+    return m
 
-    if args.gpu:
-        config = tf.ConfigProto()
-        config.gpu_options.allow_growth = True
-        config.gpu_options.per_process_gpu_memory_fraction = 0.85
-        K.tensorflow_backend.set_session(tf.Session(config=config))
 
-    img, age, gender = load_data(train_path)
-    x_train_data = img
-    y_train_age = np_utils.to_categorical(age, AGE_CATEGORY)
-    y_train_gender = np_utils.to_categorical(gender, 2)
+def model_struct():
+    inputs = Input(shape=INPUT_SHAPE)
+    m = conv_block(inputs, filters=32, bn=False, pool=False)
+    m = conv_block(m, filters=32 * 2)
+    m = conv_block(m, filters=32 * 3)
+    m = conv_block(m, filters=32 * 4)
+    m = conv_block(m, filters=32 * 5)
+    m = conv_block(m, filters=32 * 6)
+    bottleneck = GlobalMaxPool2D()(m)
 
-    img, age, gender = load_data(test_path)
-    x_test_data = img
-    y_test_age = np_utils.to_categorical(age, AGE_CATEGORY)
-    y_test_gender = np_utils.to_categorical(gender, 2)
+    # for age calculation
+    a_dense = Dense(units=128, activation='relu')(bottleneck)
+    age_output = Dense(
+        units=AGE_CATEGORY, activation='sigmoid', name='age_output')(a_dense)
 
+    # for gender prediction
+    g_dense = Dense(units=128, activation='relu')(bottleneck)
+    gender_output = Dense(
+        units=2, activation='softmax', name='gender_output')(g_dense)
+
+    model = Model(inputs=inputs, outputs=[gender_output, age_output])
+    model.summary()
+
+    opt = SGD(lr=0.01, momentum=0.9)
+    model.compile(
+        optimizer='adam',
+        loss=["categorical_crossentropy", "categorical_crossentropy"],
+        metrics=['accuracy'])
+
+    return model
+
+
+def origin_model():
     inputs = Input(shape=INPUT_SHAPE)
     x = Conv2D(32, (3, 3), activation='relu')(inputs)
     x = MaxPooling2D(2, 2)(x)
@@ -130,6 +155,34 @@ def main():
         loss=["categorical_crossentropy", "categorical_crossentropy"],
         metrics=['accuracy'])
 
+    return model
+
+
+def main():
+    init_detector()
+    args = parser.parse_args()
+    train_path = args.train_dir
+    test_path = args.test_dir
+
+    if args.gpu:
+        config = tf.ConfigProto()
+        config.gpu_options.allow_growth = True
+        config.gpu_options.per_process_gpu_memory_fraction = 0.85
+        K.tensorflow_backend.set_session(tf.Session(config=config))
+
+    img, age, gender = load_data(train_path)
+    x_train_data = img
+    y_train_age = np_utils.to_categorical(age, AGE_CATEGORY)
+    y_train_gender = np_utils.to_categorical(gender, 2)
+
+    img, age, gender = load_data(test_path)
+    x_test_data = img
+    y_test_age = np_utils.to_categorical(age, AGE_CATEGORY)
+    y_test_gender = np_utils.to_categorical(gender, 2)
+
+    model = model_struct()
+    
+
     callbacks = [
         EarlyStopping(
             monitor='val_loss',
@@ -161,8 +214,10 @@ def main():
         frozen_graph = freeze_session(sess, output_names=additional_nodes)
 
         # save model to pb file
-        tf.train.write_graph(frozen_graph, "./", "age_gender_v1.pb", as_text=False)
-        tf.train.write_graph(frozen_graph, "./", "age_gender_v1.pbtxt", as_text=True)
+        tf.train.write_graph(
+            frozen_graph, "./", "age_gender_v1.pb", as_text=False)
+        tf.train.write_graph(
+            frozen_graph, "./", "age_gender_v1.pbtxt", as_text=True)
 
 
 if __name__ == '__main__':
