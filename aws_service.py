@@ -6,6 +6,9 @@ import csv
 import glob
 from PIL import Image
 
+session = boto3.Session(profile_name='qa')
+client = session.client('rekognition', region_name="ap-southeast-1")
+
 
 def main():
     images = glob.glob('20190924_asia_face_label/**/*.jpg')
@@ -25,10 +28,6 @@ def main():
             buf = io.BytesIO()
             image.save(buf, format='JPEG')
             byte_im = buf.getvalue()
-
-            session = boto3.Session(profile_name='qa')
-            client = session.client(
-                'rekognition', region_name="ap-southeast-1")
 
             response = client.detect_faces(
                 Image={'Bytes': byte_im}, Attributes=['ALL'])
